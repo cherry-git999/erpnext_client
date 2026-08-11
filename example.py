@@ -10,12 +10,12 @@ if __name__ == "__main__":
     and performs various operations such as retrieving a dataset, 
     synchronizing and pulling a dataset, and retrieving the dataset schema.
     """
-    client = ERPNextClient(base_url="https://erp.csa-india.org")
-    username = "your_username"
-    password = "your_password"
+    client = ERPNextClient(base_url="https://erp.fpohub.com")
+    username = "ads@aegiondynamic.com"
+    password = "Csa@2025"
     client.login(username, password)
     
-    dataset_id = 'Diageo Baseline'
+    dataset_id = 'Purchase Invoice'
     print(f"Trying to access dataset: {dataset_id}")
     
     try:

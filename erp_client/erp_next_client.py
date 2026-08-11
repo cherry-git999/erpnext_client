@@ -18,7 +18,7 @@ class ERPNextClient:
         Args:
             base_url (str): The base URL of the ERPNext instance.
         """
-        self.base_url = base_url
+        self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
     
     def login(self, username: str, password: str) -> None:
