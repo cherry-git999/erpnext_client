@@ -59,6 +59,7 @@ class ERPNextClient:
     def login(self, username: str, password: str) -> None:
         """
         Logs into the ERPNext system using session authentication.
+        Automatically handles HTTP to HTTPS redirects while preserving POST credentials.
 
         Args:
             username (str): The username for login.
@@ -69,8 +70,31 @@ class ERPNextClient:
         """
         login_url = f"{self.base_url}/api/method/login"
         response = self.session.post(
-            login_url, data={"usr": username, "pwd": password}
+            login_url,
+            data={"usr": username, "pwd": password},
+            allow_redirects=False,
         )
+
+        # Handle 301/302/303/307/308 redirects (e.g., http:// to https://)
+        # Standard HTTP client behavior converts POST to GET and drops the body on 301/302.
+        # By handling redirects explicitly, we update base_url and re-POST credentials to the target URL.
+        if response.status_code in (301, 302, 303, 307, 308):
+            redirect_url = response.headers.get("Location")
+            if redirect_url:
+                if redirect_url.endswith("/api/method/login"):
+                    self.base_url = redirect_url[
+                        : -len("/api/method/login")
+                    ].rstrip("/")
+                elif "/api/method/login" in redirect_url:
+                    self.base_url = redirect_url.split("/api/method/login")[
+                        0
+                    ].rstrip("/")
+
+                response = self.session.post(
+                    redirect_url,
+                    data={"usr": username, "pwd": password},
+                )
+
         self._validate_response(response, context="Login")
 
     def _get_doctype_meta(self, dataset_id: str) -> Dict[str, Any]:
@@ -507,16 +531,185 @@ class ERPNextClient:
             },
         }
 
+    def run_query_report(
+        self,
+        report_name: str,
+        filters: Optional[Dict[str, Any]] = None,
+        ignore_prepared_report: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Executes an ERPNext Query Report or Script Report and returns structured report data.
+
+        Args:
+            report_name (str): The name of the ERPNext Query Report (e.g. 'Stock Balance').
+            filters (Optional[Dict[str, Any]]): Dictionary of report filters (e.g. company, from_date, to_date).
+            ignore_prepared_report (bool): If True, executes and returns data directly without background queue.
+
+        Returns:
+            Dict[str, Any]: Structured dictionary with columns, records, total_records, and metadata.
+
+        Raises:
+            HTTPError: If the report execution fails.
+            ValueError: If the response is malformed.
+        """
+        endpoint = f"{self.base_url}/api/method/frappe.desk.query_report.run"
+        payload: Dict[str, Any] = {
+            "report_name": report_name,
+            "ignore_prepared_report": "True" if ignore_prepared_report else "False",
+        }
+        if filters:
+            payload["filters"] = json.dumps(filters)
+
+        response = self.session.post(endpoint, data=payload)
+        data = self._validate_response(
+            response, context=f"Query Report '{report_name}'"
+        )
+        msg = data.get("message", {})
+
+        raw_columns = msg.get("columns", [])
+        raw_results = msg.get("result", [])
+
+        # Process columns metadata and fieldnames
+        col_meta: List[Dict[str, Any]] = []
+        col_fieldnames: List[str] = []
+        for col in raw_columns:
+            if isinstance(col, dict):
+                fname = col.get("fieldname") or col.get("label") or str(col)
+                col_fieldnames.append(fname)
+                col_meta.append(col)
+            else:
+                col_fieldnames.append(str(col))
+                col_meta.append({"fieldname": str(col), "label": str(col)})
+
+        # Separate data rows from summary/total rows
+        clean_records: List[Dict[str, Any]] = []
+        total_row: Optional[Dict[str, Any]] = None
+
+        for row in raw_results:
+            if isinstance(row, dict):
+                clean_records.append(row)
+            elif isinstance(row, (list, tuple)):
+                row_dict = {col: val for col, val in zip(col_fieldnames, row)}
+                # Check if this is the summary Total row
+                if row and str(row[0]).strip().lower() == "total":
+                    total_row = row_dict
+                else:
+                    clean_records.append(row_dict)
+
+        return {
+            "report_name": report_name,
+            "source_type": "query_report",
+            "columns": col_meta,
+            "column_fieldnames": col_fieldnames,
+            "records": clean_records,
+            "total_records": len(clean_records),
+            "total_row": total_row,
+            "chart": msg.get("chart"),
+            "report_summary": msg.get("report_summary"),
+        }
+
+    def get_query_report(
+        self,
+        report_name: str,
+        filters: Optional[Dict[str, Any]] = None,
+        ignore_prepared_report: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Executes an ERPNext Query Report and returns the results as a Pandas DataFrame.
+
+        Args:
+            report_name (str): The name of the ERPNext Query Report.
+            filters (Optional[Dict[str, Any]]): Dictionary of report filters.
+            ignore_prepared_report (bool): If True, bypasses background prepared report queue.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the report rows.
+        """
+        report_obj = self.run_query_report(
+            report_name=report_name,
+            filters=filters,
+            ignore_prepared_report=ignore_prepared_report,
+        )
+        return pd.DataFrame(report_obj["records"])
+
+    def get_data(
+        self,
+        dataset_id: str,
+        source_type: str = "doctype",
+        filters: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """
+        Unified data retrieval method supporting both ERPNext DocTypes and Query Reports.
+
+        Args:
+            dataset_id (str): The DocType name or Query Report name.
+            source_type (str): 'doctype' for DocType resources or 'query_report' for Query Reports.
+            filters (Optional[Dict[str, Any]]): Filters to apply.
+            **kwargs: Additional parameters passed to underlying retrieval methods.
+
+        Returns:
+            pd.DataFrame: Retrieved data as a Pandas DataFrame.
+
+        Raises:
+            ValueError: If source_type is unsupported.
+        """
+        stype = source_type.lower().strip()
+        if stype == "doctype":
+            return self.get_dataset(dataset_id=dataset_id, filters=filters, **kwargs)
+        elif stype in ("query_report", "report"):
+            return self.get_query_report(report_name=dataset_id, filters=filters, **kwargs)
+        else:
+            raise ValueError(
+                f"Unsupported source_type '{source_type}'. Expected 'doctype' or 'query_report'."
+            )
+
+    def get_data_object(
+        self,
+        dataset_id: str,
+        source_type: str = "doctype",
+        filters: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Unified structured extraction method returning full dataset/report objects.
+
+        Args:
+            dataset_id (str): The DocType name or Query Report name.
+            source_type (str): 'doctype' or 'query_report'.
+            filters (Optional[Dict[str, Any]]): Filters to apply.
+            **kwargs: Additional parameters passed to underlying methods.
+
+        Returns:
+            Dict[str, Any]: Structured dictionary representation.
+
+        Raises:
+            ValueError: If source_type is unsupported.
+        """
+        stype = source_type.lower().strip()
+        if stype == "doctype":
+            return self.get_dataset_object(
+                dataset_id=dataset_id, filters=filters, **kwargs
+            )
+        elif stype in ("query_report", "report"):
+            return self.run_query_report(
+                report_name=dataset_id, filters=filters, **kwargs
+            )
+        else:
+            raise ValueError(
+                f"Unsupported source_type '{source_type}'. Expected 'doctype' or 'query_report'."
+            )
+
     def to_dataframe(
         self, data: Any, table_name: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Converts extracted dataset objects or reshaped structures into a Pandas DataFrame.
+        Converts extracted dataset objects, reshaped structures, or report objects into a Pandas DataFrame.
 
         Args:
-            data (Any): Dataset object, reshaped dataset dictionary, or list of dictionaries.
+            data (Any): Dataset object, reshaped dataset dictionary, Query Report dict, or list of dicts.
             table_name (Optional[str]): If specified, extracts that child table as a DataFrame.
-                                        If None, extracts parent records as a DataFrame.
+                                        If None, extracts parent/main records as a DataFrame.
 
         Returns:
             pd.DataFrame: Converted DataFrame.
@@ -525,6 +718,10 @@ class ERPNextClient:
             return data
 
         if isinstance(data, dict):
+            # Query Report object format (from run_query_report)
+            if data.get("source_type") == "query_report" and "records" in data:
+                return pd.DataFrame(data["records"])
+
             # Reshaped dataset format
             if "parent_records" in data and "child_tables" in data:
                 if table_name is None:
