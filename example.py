@@ -10,7 +10,7 @@ if __name__ == "__main__":
     - DocTypes (e.g. 'CC Daily Reports')
     - Query Reports (e.g. 'Stock Balance')
     """
-    client = ERPNextClient(base_url="http://erp.fpohub.com")
+    client = ERPNextClient(base_url="http://erp.csa-india.org")
     username = "[EMAIL_ADDRESS]"
     password = "[PASSWORD]"
 
@@ -27,8 +27,8 @@ if __name__ == "__main__":
     # Configure target dataset and source type:
     # Option 1: source_type = "query_report", dataset_id = "Stock Balance"
     # Option 2: source_type = "doctype", dataset_id = "CC Daily Reports" (on http://erp.csa-india.org)
-    source_type = "query_report"
-    dataset_id = "Stock Balance"
+    source_type = "doctype"
+    dataset_id = "CC Daily Reports" 
 
     print(f"\n{'='*70}")
     print(f"Target Source Type : {source_type}")
