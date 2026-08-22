@@ -47,3 +47,8 @@ venv.bak/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Linter and type checker caches
+.ruff_cache/
+.mypy_cache/
+
